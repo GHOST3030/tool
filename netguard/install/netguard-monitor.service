@@ -1,0 +1,12 @@
+[Unit]
+Description=NetGuard bandwidth monitor and enforcer
+After=graphical-session.target network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/netguard/venv/bin/python -m netguard.monitor.collector
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

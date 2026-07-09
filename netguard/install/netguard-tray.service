@@ -1,0 +1,12 @@
+[Unit]
+Description=NetGuard taskbar tray icon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/netguard/venv/bin/python -m netguard.gui.tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

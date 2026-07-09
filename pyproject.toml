@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netguard"
+version = "0.1.0"
+description = "Per-app network blocking, bandwidth limiting, and monitoring for Zorin OS"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6>=6.5",
+    "psutil>=5.9",
+]
+
+[tool.setuptools]
+packages = ["netguard", "netguard.common", "netguard.gui", "netguard.monitor", "netguard.helper"]

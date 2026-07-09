@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NetGuard
+Comment=Control and monitor per-app network usage
+Exec=%h/.local/share/netguard/venv/bin/python -m netguard.gui.main
+Icon=network-transmit-receive
+Terminal=false
+Categories=Network;System;
