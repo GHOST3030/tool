@@ -138,18 +138,19 @@ class Collector:
 
             should_block = (not in_window) or over_cap
             was_blocked = self._auto_blocked.get(app["id"], False)
+            if should_block == was_blocked:
+                continue  # no state change -- skip redundant nft/cgroup calls this tick
+
             try:
                 if should_block:
                     priv.block(cg)
                     reason = "outside its allowed schedule" if not in_window else "hit its data cap"
-                    if not was_blocked:
-                        db.log_event(app["id"], "auto_block",
-                                     "schedule" if not in_window else "cap_exceeded")
-                        notify("NetGuard: app blocked",
-                               f"{app['name']} was blocked because it {reason}.")
+                    db.log_event(app["id"], "auto_block",
+                                 "schedule" if not in_window else "cap_exceeded")
+                    notify("NetGuard: app blocked",
+                           f"{app['name']} was blocked because it {reason}.")
                 else:
-                    if was_blocked:
-                        notify("NetGuard: app unblocked", f"{app['name']} network access restored.")
+                    notify("NetGuard: app unblocked", f"{app['name']} network access restored.")
                     priv.unblock(cg)
                     if cap["rate_kbps"]:
                         priv.limit(cg, cap["rate_kbps"])
