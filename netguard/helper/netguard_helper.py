@@ -50,7 +50,7 @@ def ensure_cgroup_root():
     os.makedirs(CGROUP_ROOT, exist_ok=True)
 
 
-def cmd_setup(_args):
+def ensure_table():
     ensure_cgroup_root()
     # Base table + chains. Safe to re-run (nft add is idempotent for tables/chains).
     script = f"""
@@ -59,6 +59,10 @@ add chain {NFT_TABLE} output {{ type filter hook output priority 0; policy accep
 add chain {NFT_TABLE} input {{ type filter hook input priority 0; policy accept; }}
 """
     sh("nft", "-f", "-", input=script, check=False)
+
+
+def cmd_setup(_args):
+    ensure_table()
     print("ok")
 
 
@@ -71,11 +75,28 @@ def counter_name(app, direction):
 
 def cmd_create(args):
     app = args[0]
-    ensure_cgroup_root()
+    ensure_table()
     os.makedirs(cgroup_path(app), exist_ok=True)
     for direction in ("output", "input"):
         sh("nft", "add", "counter", *NFT_TABLE.split(), counter_name(app, direction), check=False)
+    _add_monitor_rule(app)
     print("ok")
+
+
+def _add_monitor_rule(app):
+    """Baseline rule: count and allow this app's traffic. Present whenever the
+    app isn't blocked/rate-limited, so usage is tracked continuously -- caps
+    and usage stats would otherwise only ever see zero bytes for apps that
+    are never blocked."""
+    rel, level = cgroup_rel(app), cgroup_level(app)
+    for direction in ("output", "input"):
+        sh(
+            "nft", "add", "rule", *NFT_TABLE.split(), direction,
+            "socket", "cgroupv2", "level", str(level), rel,
+            "counter", "name", counter_name(app, direction),
+            "accept",
+            "comment", f'"netguard:{app}"',
+        )
 
 
 def cmd_destroy(args):
@@ -130,7 +151,7 @@ def cmd_block(args):
             "socket", "cgroupv2", "level", str(level), rel,
             "counter", "name", counter_name(app, direction),
             "drop",
-            "comment", f"netguard:{app}",
+            "comment", f'"netguard:{app}"',
         )
     print("ok")
 
@@ -139,6 +160,7 @@ def cmd_unblock(args):
     app = args[0]
     for direction in ("output", "input"):
         _remove_matching_rules(app, direction)
+    _add_monitor_rule(app)
     print("ok")
 
 
@@ -156,20 +178,20 @@ def cmd_limit(args):
             "limit", "rate", f"{kbytes}", "kbytes/second",
             "counter", "name", counter,
             "accept",
-            "comment", f"netguard:{app}",
+            "comment", f'"netguard:{app}"',
         )
         sh(
             "nft", "add", "rule", *NFT_TABLE.split(), direction,
             "socket", "cgroupv2", "level", str(level), rel,
             "counter", "name", counter,
             "drop",
-            "comment", f"netguard:{app}",
+            "comment", f'"netguard:{app}"',
         )
     print("ok")
 
 
 def cmd_unlimit(args):
-    cmd_unblock(args)  # same rule-removal logic; caller re-applies block/nothing as needed
+    cmd_unblock(args)  # same rule-removal + monitor-rule-restore logic
 
 
 def cmd_counters(_args):
