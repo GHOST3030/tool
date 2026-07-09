@@ -10,6 +10,7 @@
 Meant to run as a systemd --user service, started at login (see install/).
 """
 import logging
+import subprocess
 import time
 from datetime import datetime
 
@@ -18,15 +19,28 @@ import psutil
 from netguard.common import db, priv
 from netguard.common.config import POLL_INTERVAL_SECONDS
 
+
+def notify(summary, body):
+    """Best-effort desktop notification. Silently does nothing if notify-send
+    isn't available or there's no session bus (e.g. headless testing)."""
+    try:
+        subprocess.run(
+            ["notify-send", "--app-name=NetGuard", "--icon=network-transmit-receive", summary, body],
+            check=False, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s netguard-monitor: %(message)s")
 log = logging.getLogger("netguard.monitor")
 
 
 class Collector:
     def __init__(self):
-        self._last_counter_bytes = {}   # app_name -> last cumulative byte count seen
+        self._last_counter_bytes = {}   # app_name -> {"rx": last cumulative rx, "tx": last cumulative tx}
         self._session_start = {}        # app_id -> timestamp of first sample this "session"
         self._known_pids = {}           # app_name -> set of pids already attached
+        self._auto_blocked = {}         # app_id -> bool, last known auto-enforcement state
 
     def bootstrap(self):
         priv.setup()
@@ -41,13 +55,21 @@ class Collector:
 
     def _matches(self, proc, app):
         try:
-            if app["match_kind"] == "process_name":
-                return proc.name() == app["match_value"]
-            if app["match_kind"] == "path":
-                return proc.exe() == app["match_value"]
-            if app["match_kind"] == "desktop_file":
-                # Heuristic: desktop entry Exec basename vs process name.
-                return proc.name() == app["match_value"]
+            kind, value = app["match_kind"], app["match_value"]
+            if kind == "process_name":
+                return proc.name() == value
+            if kind == "path":
+                return proc.exe() == value
+            if kind == "flatpak":
+                # Flatpak apps run under bwrap with the app ID somewhere in argv,
+                # e.g. ".../flatpak-bwrap ... --app-id=org.mozilla.firefox ..."
+                cmdline = " ".join(proc.cmdline())
+                return value in cmdline
+            if kind == "snap":
+                # Snap apps run as /snap/<name>/current/... or via `snap run <name>`.
+                exe = proc.exe() or ""
+                cmdline = " ".join(proc.cmdline())
+                return f"/snap/{value}/" in exe or value in cmdline
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
         return False
@@ -77,12 +99,14 @@ class Collector:
             return
         for app in db.list_apps():
             cg = app["cgroup_name"]
-            total_now = counts.get(cg, {}).get("tx_bytes", 0)
-            last = self._last_counter_bytes.get(cg, total_now)
-            delta = max(0, total_now - last)
-            self._last_counter_bytes[cg] = total_now
-            if delta > 0:
-                db.record_sample(app["id"], rx_bytes=0, tx_bytes=delta)
+            rx_now = counts.get(cg, {}).get("rx_bytes", 0)
+            tx_now = counts.get(cg, {}).get("tx_bytes", 0)
+            last = self._last_counter_bytes.get(cg, {"rx": rx_now, "tx": tx_now})
+            rx_delta = max(0, rx_now - last["rx"])
+            tx_delta = max(0, tx_now - last["tx"])
+            self._last_counter_bytes[cg] = {"rx": rx_now, "tx": tx_now}
+            if rx_delta > 0 or tx_delta > 0:
+                db.record_sample(app["id"], rx_bytes=rx_delta, tx_bytes=tx_delta)
 
     def enforce_caps(self):
         now = datetime.now()
@@ -113,15 +137,23 @@ class Collector:
                 over_cap = used >= cap["limit_mb"] * 1024 * 1024
 
             should_block = (not in_window) or over_cap
+            was_blocked = self._auto_blocked.get(app["id"], False)
             try:
                 if should_block:
                     priv.block(cg)
-                    db.log_event(app["id"], "auto_block",
-                                 "schedule" if not in_window else "cap_exceeded")
+                    reason = "outside its allowed schedule" if not in_window else "hit its data cap"
+                    if not was_blocked:
+                        db.log_event(app["id"], "auto_block",
+                                     "schedule" if not in_window else "cap_exceeded")
+                        notify("NetGuard: app blocked",
+                               f"{app['name']} was blocked because it {reason}.")
                 else:
+                    if was_blocked:
+                        notify("NetGuard: app unblocked", f"{app['name']} network access restored.")
                     priv.unblock(cg)
                     if cap["rate_kbps"]:
                         priv.limit(cg, cap["rate_kbps"])
+                self._auto_blocked[app["id"]] = should_block
             except priv.HelperError as e:
                 log.warning("enforcement failed for %s: %s", app["name"], e)
 

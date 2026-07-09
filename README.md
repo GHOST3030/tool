@@ -22,10 +22,14 @@ ranges, and see live totals from the taskbar tray icon.
   to a local SQLite database, and enforces your caps/schedules
   automatically.
 - A **PyQt6 GUI** (`netguard/gui/main.py`) lets you add apps (from running
-  processes, installed `.desktop` entries, or a manual executable path),
-  toggle blocking, and set caps/schedules.
-- A **tray icon** (`netguard/gui/tray.py`) shows bandwidth totals for the
-  last 3 hours, today, yesterday, this week, or a custom range.
+  processes, installed `.desktop` entries — with proper Flatpak/Snap
+  `Exec=` resolution — or a manual executable path), toggle blocking, set
+  caps/schedules, and view historical usage charts (`pyqtgraph`).
+- A **tray icon** (`netguard/gui/tray.py`) shows bandwidth totals (with a
+  real download/upload split) for the last 3 hours, today, yesterday, this
+  week, or a custom range.
+- **Desktop notifications** fire when the monitor auto-blocks or
+  auto-unblocks an app, so caps/schedules never silently kick in.
 - Both the monitor and tray icon start automatically at login via
   `systemd --user` services.
 
@@ -53,23 +57,16 @@ This is an initial working implementation. Not yet tested on real hardware
 in this environment — see "Suggested next steps" below before relying on
 it for anything sensitive (e.g. parental controls).
 
-## Suggested improvements
+## Suggested improvements (not yet done)
 
-- **Real rx/tx split**: currently one shared nftables counter reports
-  combined bytes; splitting input/output into separate named counters
-  would give accurate upload vs download breakdowns.
-- **`.desktop` file matching**: current desktop-entry matching just falls
-  back to comparing process name; parsing the `Exec=` line properly would
-  be more robust for apps with wrapper scripts (Flatpak, Electron, etc.).
-- **Historical charts**: the Usage tab currently shows a table; adding
-  `pyqtgraph` line/bar charts (hourly/daily trends) would make patterns
-  easier to spot.
 - **Per-app icons** in both the GUI table and tray menu for quicker
   visual scanning.
-- **Notifications** (via `notify-send`/`libnotify`) when an app is
-  auto-blocked for hitting its cap, so it's not a silent surprise.
-- **Flatpak/Snap awareness**: sandboxed apps run under their own cgroup
-  scopes already; worth testing matching against those namespaces
-  specifically.
 - **Config export/import** so cap/schedule setups can be backed up or
   shared across machines.
+- **Real-world testing of Flatpak/Snap matching**: the matching logic
+  scans `proc.cmdline()`/`proc.exe()` for the app ID/snap name, which
+  should work but hasn't been verified against actual sandboxed apps on
+  real hardware yet.
+- **Per-app icons in the chart legend** and a per-app filter dropdown on
+  the Usage tab chart (it currently charts the combined total, with the
+  table below already broken out per app).

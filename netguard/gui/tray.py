@@ -100,7 +100,8 @@ class NetGuardTray(QSystemTrayIcon):
             else:
                 total = db.usage_total(self._selected_period)
             label = next(l for l, p in PERIODS if p == self._selected_period)
-            text = f"{label}: {human_bytes(total['total_bytes'])}"
+            text = (f"{label}: {human_bytes(total['total_bytes'])} "
+                    f"(↓{human_bytes(total['rx_bytes'])} ↑{human_bytes(total['tx_bytes'])})")
             self.usage_action.setText(text)
             self.setToolTip(f"NetGuard - {text}")
         except Exception as e:

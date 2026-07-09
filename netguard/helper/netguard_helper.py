@@ -15,7 +15,7 @@ Usage:
   netguard-helper unblock  <app>
   netguard-helper limit    <app> <rate_kbps>
   netguard-helper unlimit  <app>
-  netguard-helper counters              # JSON {app: {rx_bytes, tx_bytes}} for all apps
+  netguard-helper counters              # JSON {app: {rx_bytes, tx_bytes}} for all apps, true rx/tx split
 """
 import json
 import os
@@ -62,12 +62,19 @@ add chain {NFT_TABLE} input {{ type filter hook input priority 0; policy accept;
     print("ok")
 
 
+def counter_name(app, direction):
+    # output chain = traffic leaving this machine = tx (upload)
+    # input chain  = traffic arriving at this machine = rx (download)
+    suffix = "tx" if direction == "output" else "rx"
+    return f"cnt_{app}_{suffix}"
+
+
 def cmd_create(args):
     app = args[0]
     ensure_cgroup_root()
     os.makedirs(cgroup_path(app), exist_ok=True)
-    counter = f"cnt_{app}"
-    sh("nft", "add", "counter", *NFT_TABLE.split(), counter, check=False)
+    for direction in ("output", "input"):
+        sh("nft", "add", "counter", *NFT_TABLE.split(), counter_name(app, direction), check=False)
     print("ok")
 
 
@@ -75,7 +82,7 @@ def cmd_destroy(args):
     app = args[0]
     for direction in ("output", "input"):
         _remove_matching_rules(app, direction)
-    sh("nft", "delete", "counter", *NFT_TABLE.split(), f"cnt_{app}", check=False)
+        sh("nft", "delete", "counter", *NFT_TABLE.split(), counter_name(app, direction), check=False)
     path = cgroup_path(app)
     if os.path.isdir(path):
         try:
@@ -116,13 +123,12 @@ def _remove_matching_rules(app, direction):
 def cmd_block(args):
     app = args[0]
     rel, level = cgroup_rel(app), cgroup_level(app)
-    counter = f"cnt_{app}"
     for direction in ("output", "input"):
         _remove_matching_rules(app, direction)
         sh(
             "nft", "add", "rule", *NFT_TABLE.split(), direction,
             "socket", "cgroupv2", "level", str(level), rel,
-            "counter", "name", counter,
+            "counter", "name", counter_name(app, direction),
             "drop",
             "comment", f"netguard:{app}",
         )
@@ -139,10 +145,10 @@ def cmd_unblock(args):
 def cmd_limit(args):
     app, rate_kbps = args[0], args[1]
     rel, level = cgroup_rel(app), cgroup_level(app)
-    counter = f"cnt_{app}"
     kbytes = max(1, int(float(rate_kbps) / 8))  # kbps -> KB/s for nft's `kbytes/second`
     for direction in ("output", "input"):
         _remove_matching_rules(app, direction)
+        counter = counter_name(app, direction)
         # Accept up to the rate, drop the overflow -- two rules per direction.
         sh(
             "nft", "add", "rule", *NFT_TABLE.split(), direction,
@@ -178,14 +184,12 @@ def cmd_counters(_args):
         if not counter:
             continue
         name = counter.get("name", "")
-        if not name.startswith("cnt_"):
+        if not name.startswith("cnt_") or not (name.endswith("_rx") or name.endswith("_tx")):
             continue
-        app = name[len("cnt_"):]
-        # One counter per app shared by output+input chains, so we get a single
-        # combined byte total rather than a true rx/tx split. The collector
-        # treats total_bytes as authoritative for quota/cap enforcement.
-        result.setdefault(app, {"rx_bytes": 0, "tx_bytes": 0})
-        result[app]["tx_bytes"] += counter.get("bytes", 0)
+        direction = name[-2:]        # "rx" or "tx"
+        app = name[len("cnt_"):-3]   # strip "cnt_" prefix and "_rx"/"_tx" suffix
+        entry = result.setdefault(app, {"rx_bytes": 0, "tx_bytes": 0})
+        entry[f"{direction}_bytes"] += counter.get("bytes", 0)
     print(json.dumps(result))
 
 

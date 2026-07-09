@@ -217,6 +217,31 @@ def session_usage_bytes(app_id, since_ts):
         return row["rx"] + row["tx"]
 
 
+def usage_timeseries(period="week", app_id=None, custom_start=None, custom_end=None):
+    """Bucketed usage for charting: hourly buckets for short periods, daily
+    buckets for week/custom. Returns a list of (bucket_start_ts, total_bytes)."""
+    start_ts, end_ts = _range_bounds(period, custom_start, custom_end)
+    bucket_seconds = 3600 if period in ("today", "yesterday", "last_3h") else 86400
+
+    query = "SELECT ts, rx_bytes, tx_bytes FROM samples WHERE ts>=? AND ts<?"
+    params = [start_ts, end_ts]
+    if app_id is not None:
+        query += " AND app_id=?"
+        params.append(app_id)
+
+    with connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    buckets = {}
+    for r in rows:
+        bucket = start_ts + ((r["ts"] - start_ts) // bucket_seconds) * bucket_seconds
+        buckets[bucket] = buckets.get(bucket, 0) + r["rx_bytes"] + r["tx_bytes"]
+
+    n_buckets = max(1, int((end_ts - start_ts) // bucket_seconds) + 1)
+    return [(start_ts + i * bucket_seconds, buckets.get(start_ts + i * bucket_seconds, 0))
+            for i in range(n_buckets)]
+
+
 def prune_old_samples(max_age_days=90):
     cutoff = time.time() - max_age_days * 86400
     with connect() as conn:

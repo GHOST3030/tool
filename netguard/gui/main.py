@@ -4,6 +4,7 @@ import os
 import sys
 
 import psutil
+import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from netguard.common import db, priv  # noqa: E402
+from netguard.common import db, priv, desktopapps  # noqa: E402
 
 
 def human_bytes(n):
@@ -34,14 +35,18 @@ class AppsTab(QWidget):
         layout = QVBoxLayout(self)
 
         add_row = QHBoxLayout()
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Running processes", "Installed apps"])
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         self.proc_combo = QComboBox()
         self.proc_combo.setEditable(False)
-        self.refresh_btn = QPushButton("Refresh running apps")
-        self.refresh_btn.clicked.connect(self.refresh_processes)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self._refresh_current_source)
         self.browse_btn = QPushButton("Browse for executable...")
         self.browse_btn.clicked.connect(self.browse_executable)
         self.add_btn = QPushButton("Add to control list")
         self.add_btn.clicked.connect(self.add_selected)
+        add_row.addWidget(self.source_combo)
         add_row.addWidget(self.proc_combo, 1)
         add_row.addWidget(self.refresh_btn)
         add_row.addWidget(self.browse_btn)
@@ -55,12 +60,22 @@ class AppsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
-        self.refresh_processes()
+        self._installed_apps = []  # parallel to proc_combo items when source == Installed apps
+        self._refresh_current_source()
         self.reload_table()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.reload_table)
         self._timer.start(5000)
+
+    def _on_source_changed(self, _index):
+        self._refresh_current_source()
+
+    def _refresh_current_source(self):
+        if self.source_combo.currentText() == "Running processes":
+            self.refresh_processes()
+        else:
+            self.refresh_installed_apps()
 
     def refresh_processes(self):
         self.proc_combo.clear()
@@ -74,16 +89,28 @@ class AppsTab(QWidget):
                 seen.add(name)
                 self.proc_combo.addItem(name)
 
+    def refresh_installed_apps(self):
+        self.proc_combo.clear()
+        self._installed_apps = desktopapps.list_desktop_apps()
+        for app in self._installed_apps:
+            self.proc_combo.addItem(app.name)
+
     def browse_executable(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select executable", "/usr/bin")
         if path:
             self._add_app(os.path.basename(path), "path", path)
 
     def add_selected(self):
-        name = self.proc_combo.currentText()
-        if not name:
+        idx = self.proc_combo.currentIndex()
+        if idx < 0:
             return
-        self._add_app(name, "process_name", name)
+        if self.source_combo.currentText() == "Running processes":
+            name = self.proc_combo.currentText()
+            if name:
+                self._add_app(name, "process_name", name)
+        else:
+            app = self._installed_apps[idx]
+            self._add_app(app.name, app.kind, app.match_value)
 
     def _add_app(self, name, match_kind, match_value):
         cgroup_name = slugify(name)
@@ -101,7 +128,9 @@ class AppsTab(QWidget):
             cap = db.get_cap(app["id"]) or {}
             usage = db.usage_for_app(app["id"], period="today")
 
-            self.table.setItem(row, 0, QTableWidgetItem(f"{app['name']}  ({human_bytes(usage['total_bytes'])} today)"))
+            usage_str = (f"{app['name']}  (today: {human_bytes(usage['total_bytes'])} total, "
+                         f"↓{human_bytes(usage['rx_bytes'])} ↑{human_bytes(usage['tx_bytes'])})")
+            self.table.setItem(row, 0, QTableWidgetItem(usage_str))
 
             block_chk = QCheckBox()
             block_chk.setChecked(bool(cap.get("blocked")))
@@ -209,8 +238,16 @@ class UsageTab(QWidget):
         top.addWidget(self.total_label)
         layout.addLayout(top)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["App", "Usage"])
+        pg.setConfigOption("background", "default")
+        pg.setConfigOption("foreground", "default")
+        self.chart = pg.PlotWidget()
+        self.chart.setLabel("left", "Bandwidth", units="B")
+        self.chart.showGrid(x=True, y=True, alpha=0.3)
+        self.chart.setMinimumHeight(220)
+        layout.addWidget(self.chart)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["App", "Total", "Downloaded", "Uploaded"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
@@ -227,8 +264,25 @@ class UsageTab(QWidget):
         for i, r in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(r["name"]))
             self.table.setItem(i, 1, QTableWidgetItem(human_bytes(r["total_bytes"])))
+            self.table.setItem(i, 2, QTableWidgetItem(human_bytes(r["rx_bytes"])))
+            self.table.setItem(i, 3, QTableWidgetItem(human_bytes(r["tx_bytes"])))
         total = db.usage_total(period=period)
         self.total_label.setText(f"Total: {human_bytes(total['total_bytes'])}")
+        self._reload_chart(period)
+
+    def _reload_chart(self, period):
+        series = db.usage_timeseries(period=period)
+        self.chart.clear()
+        if not series:
+            return
+        start_ts = series[0][0]
+        xs = [(ts - start_ts) / 3600.0 for ts, _ in series]  # hours since range start
+        ys = [total for _, total in series]
+        bucket_hours = 24 if period == "week" else 1
+        width = bucket_hours * 0.8
+        bar = pg.BarGraphItem(x=xs, height=ys, width=width, brush=pg.mkColor(90, 140, 220))
+        self.chart.addItem(bar)
+        self.chart.setLabel("bottom", "Days ago" if period == "week" else "Hours ago")
 
 
 class MainWindow(QMainWindow):
