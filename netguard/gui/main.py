@@ -238,8 +238,9 @@ class UsageTab(QWidget):
         top.addWidget(self.total_label)
         layout.addLayout(top)
 
-        pg.setConfigOption("background", "default")
-        pg.setConfigOption("foreground", "default")
+        palette = self.palette()
+        pg.setConfigOption("background", palette.color(palette.ColorRole.Window))
+        pg.setConfigOption("foreground", palette.color(palette.ColorRole.WindowText))
         self.chart = pg.PlotWidget()
         self.chart.setLabel("left", "Bandwidth", units="B")
         self.chart.showGrid(x=True, y=True, alpha=0.3)
