@@ -197,7 +197,7 @@ class AppsTab(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.reload_usage_and_status)
-        self._timer.start(10000)
+        self._timer.start(3000)
 
     def refresh_apps(self):
         self._installed_apps = desktopapps.list_desktop_apps()
@@ -396,7 +396,7 @@ class UsageTab(QWidget):
         self.reload()
         timer = QTimer(self)
         timer.timeout.connect(self.reload)
-        timer.start(10000)
+        timer.start(3000)
         self._timer = timer
 
     def reload(self):
