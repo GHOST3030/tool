@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QTableWidget, QTableWidgetItem, QPushButton, QLabel, QLineEdit, QComboBox,
     QDoubleSpinBox, QCheckBox, QFileDialog, QMessageBox, QHeaderView, QTimeEdit,
+    QDialog, QFormLayout, QDialogButtonBox,
 )
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -29,195 +30,335 @@ def slugify(name):
     return "".join(c if c.isalnum() else "_" for c in name).strip("_").lower() or "app"
 
 
+class AppConfigDialog(QDialog):
+    def __init__(self, parent, app_name, match_kind, match_value, existing_app=None, existing_cap=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Configure {app_name}")
+        self.resize(400, 320)
+        
+        self.app_name = app_name
+        self.match_kind = match_kind
+        self.match_value = match_value
+        self.existing_app = existing_app
+        self.existing_cap = existing_cap
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self.control_chk = QCheckBox("Enable Network Control / Monitoring")
+        self.control_chk.setChecked(existing_app is not None)
+        self.control_chk.stateChanged.connect(self._on_control_toggled)
+        form.addRow(self.control_chk)
+        
+        self.block_chk = QCheckBox("Block Internet Access")
+        form.addRow(self.block_chk)
+        
+        self.cap_combo = QComboBox()
+        self.cap_combo.addItems(["none", "daily_mb", "session_mb"])
+        self.cap_combo.currentIndexChanged.connect(self._on_cap_changed)
+        form.addRow("Cap Type:", self.cap_combo)
+        
+        self.limit_spin = QDoubleSpinBox()
+        self.limit_spin.setRange(0, 1_000_000)
+        self.limit_spin.setDecimals(1)
+        self.limit_spin.setSuffix(" MB")
+        form.addRow("Limit:", self.limit_spin)
+        
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0, 1_000_000)
+        self.rate_spin.setDecimals(1)
+        self.rate_spin.setSuffix(" kbps")
+        form.addRow("Rate Limit:", self.rate_spin)
+        
+        self.sched_start = QTimeEdit()
+        self.sched_end = QTimeEdit()
+        sched_layout = QHBoxLayout()
+        sched_layout.addWidget(self.sched_start)
+        sched_layout.addWidget(QLabel("-"))
+        sched_layout.addWidget(self.sched_end)
+        form.addRow("Allowed Schedule:", sched_layout)
+        
+        layout.addLayout(form)
+        
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        
+        if self.existing_cap:
+            self.block_chk.setChecked(bool(self.existing_cap.get("blocked")))
+            self.cap_combo.setCurrentText(self.existing_cap.get("cap_kind", "none"))
+            self.limit_spin.setValue(self.existing_cap.get("limit_mb") or 0.0)
+            self.rate_spin.setValue(self.existing_cap.get("rate_kbps") or 0.0)
+            if self.existing_cap.get("sched_start"):
+                self.sched_start.setTime(self.sched_start.time().fromString(self.existing_cap["sched_start"], "HH:mm"))
+            if self.existing_cap.get("sched_end"):
+                self.sched_end.setTime(self.sched_end.time().fromString(self.existing_cap["sched_end"], "HH:mm"))
+                
+        self._on_control_toggled()
+        
+    def _on_cap_changed(self):
+        cap_kind = self.cap_combo.currentText()
+        self.limit_spin.setEnabled(self.control_chk.isChecked() and cap_kind != "none")
+
+    def _on_control_toggled(self):
+        enabled = self.control_chk.isChecked()
+        self.block_chk.setEnabled(enabled)
+        self.cap_combo.setEnabled(enabled)
+        self._on_cap_changed()
+        self.rate_spin.setEnabled(enabled)
+        self.sched_start.setEnabled(enabled)
+        self.sched_end.setEnabled(enabled)
+
+    def accept(self):
+        cgroup_name = slugify(self.app_name)
+        
+        if self.control_chk.isChecked():
+            app_id = db.add_app(self.app_name, self.match_kind, self.match_value, cgroup_name)
+            
+            blocked = self.block_chk.isChecked()
+            cap_kind = self.cap_combo.currentText()
+            limit_mb = self.limit_spin.value() or None
+            rate_kbps = self.rate_spin.value() or None
+            sched_start = self.sched_start.time().toString("HH:mm")
+            sched_end = self.sched_end.time().toString("HH:mm")
+            if sched_start == "00:00" and sched_end == "00:00":
+                sched_start = sched_end = None
+                
+            db.set_cap(app_id, cap_kind, limit_mb, rate_kbps, sched_start, sched_end, enabled=True)
+            db.set_blocked(app_id, blocked)
+            
+            try:
+                priv.create(cgroup_name)
+                if blocked:
+                    priv.block(cgroup_name)
+                else:
+                    priv.unblock(cgroup_name)
+                    if rate_kbps:
+                        priv.limit(cgroup_name, rate_kbps)
+                    else:
+                        priv.unlimit(cgroup_name)
+            except priv.HelperError as e:
+                QMessageBox.warning(self, "NetGuard", f"Could not apply control configurations:\n{e}")
+            db.log_event(app_id, "configured", f"blocked={blocked}, cap={cap_kind}, limit={limit_mb}, rate={rate_kbps}")
+        else:
+            if self.existing_app:
+                app_id = self.existing_app["id"]
+                try:
+                    priv.destroy(cgroup_name)
+                except priv.HelperError:
+                    pass
+                db.remove_app(app_id)
+                
+        super().accept()
+
+
 class AppsTab(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
 
-        add_row = QHBoxLayout()
-        self.source_combo = QComboBox()
-        self.source_combo.addItems(["Running processes", "Installed apps"])
-        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        self.proc_combo = QComboBox()
-        self.proc_combo.setEditable(False)
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.clicked.connect(self._refresh_current_source)
-        self.browse_btn = QPushButton("Browse for executable...")
+        top_row = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search applications...")
+        self.search_input.textChanged.connect(self.filter_table)
+        
+        self.refresh_btn = QPushButton("Refresh List")
+        self.refresh_btn.clicked.connect(self.refresh_apps)
+        
+        self.browse_btn = QPushButton("Add Custom Executable...")
         self.browse_btn.clicked.connect(self.browse_executable)
-        self.add_btn = QPushButton("Add to control list")
-        self.add_btn.clicked.connect(self.add_selected)
-        add_row.addWidget(self.source_combo)
-        add_row.addWidget(self.proc_combo, 1)
-        add_row.addWidget(self.refresh_btn)
-        add_row.addWidget(self.browse_btn)
-        add_row.addWidget(self.add_btn)
-        layout.addLayout(add_row)
 
-        self.table = QTableWidget(0, 7)
+        self.limit_all_btn = QPushButton("Limit All to 100MB Session")
+        self.limit_all_btn.clicked.connect(self.limit_all_to_100mb)
+        
+        top_row.addWidget(QLabel("Search:"))
+        top_row.addWidget(self.search_input, 1)
+        top_row.addWidget(self.refresh_btn)
+        top_row.addWidget(self.browse_btn)
+        top_row.addWidget(self.limit_all_btn)
+        layout.addLayout(top_row)
+
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["App", "Blocked", "Cap type", "Limit (MB)", "Rate (kbps)", "Schedule", "Actions"]
+            ["App Name", "Controlled", "Status", "Today's Usage", "Actions"]
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.table)
 
-        self._installed_apps = []  # parallel to proc_combo items when source == Installed apps
-        self._refresh_current_source()
-        self.reload_table()
+        self._installed_apps = []
+        self._displayed_apps = []
+        self._current_rows = []
+        
+        self.refresh_apps()
 
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.reload_table)
-        self._timer.start(5000)
+        self._timer.timeout.connect(self.reload_usage_and_status)
+        self._timer.start(10000)
 
-    def _on_source_changed(self, _index):
-        self._refresh_current_source()
-
-    def _refresh_current_source(self):
-        if self.source_combo.currentText() == "Running processes":
-            self.refresh_processes()
-        else:
-            self.refresh_installed_apps()
-
-    def refresh_processes(self):
-        self.proc_combo.clear()
-        seen = set()
-        for p in psutil.process_iter(["name"]):
-            try:
-                name = p.info["name"]
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            if name and name not in seen:
-                seen.add(name)
-                self.proc_combo.addItem(name)
-
-    def refresh_installed_apps(self):
-        self.proc_combo.clear()
+    def refresh_apps(self):
         self._installed_apps = desktopapps.list_desktop_apps()
+        self.reload_table()
+
+    def limit_all_to_100mb(self):
+        reply = QMessageBox.question(
+            self,
+            "Limit All Apps",
+            "Are you sure you want to set a 100MB session cap for all installed applications?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.setCursor(Qt.CursorShape.WaitCursor)
+            try:
+                for app in self._installed_apps:
+                    # Skip systemd to avoid blocking system management processes
+                    if app.match_value == "systemd":
+                        continue
+                    cgroup_name = slugify(app.name)
+                    app_id = db.add_app(app.name, app.kind, app.match_value, cgroup_name)
+                    try:
+                        priv.create(cgroup_name)
+                        priv.unblock(cgroup_name)
+                        priv.unlimit(cgroup_name)
+                    except priv.HelperError:
+                        pass
+                    db.set_cap(app_id, cap_kind="session_mb", limit_mb=100.0, rate_kbps=None, sched_start=None, sched_end=None, enabled=True)
+                    db.set_blocked(app_id, False)
+            finally:
+                self.restoreCursor()
+            self.refresh_apps()
+
+    def sort_apps(self):
+        db_apps = db.list_apps()
+        usage_map = {}
+        for app in db_apps:
+            usage = db.usage_for_app(app["id"], period="today")
+            usage_map[app["match_value"]] = usage["total_bytes"]
+            
+        def sort_key(app):
+            db_entry = app["db_entry"]
+            if db_entry:
+                usage = usage_map.get(app["match_value"], 0)
+                return (0, -usage, app["name"].lower())
+            else:
+                return (1, 0, app["name"].lower())
+                
+        self._displayed_apps.sort(key=sort_key)
+
+    def reload_table(self):
+        db_apps = db.list_apps()
+        db_app_map = {app["match_value"]: app for app in db_apps}
+        
+        displayed_apps = []
+        seen_values = set()
+        
         for app in self._installed_apps:
-            self.proc_combo.addItem(app.name)
+            displayed_apps.append({
+                "name": app.name,
+                "kind": app.kind,
+                "match_value": app.match_value,
+                "db_entry": db_app_map.get(app.match_value)
+            })
+            seen_values.add(app.match_value)
+            
+        for db_app in db_apps:
+            if db_app["match_value"] not in seen_values:
+                displayed_apps.append({
+                    "name": db_app["name"],
+                    "kind": db_app["match_kind"],
+                    "match_value": db_app["match_value"],
+                    "db_entry": db_app
+                })
+                
+        self._displayed_apps = displayed_apps
+        self.sort_apps()
+        self.filter_table()
+
+    def filter_table(self):
+        query = self.search_input.text().lower()
+        filtered = [app for app in self._displayed_apps if query in app["name"].lower()]
+        
+        self.table.setRowCount(len(filtered))
+        self._current_rows = filtered
+        
+        for row, app in enumerate(filtered):
+            self.table.setItem(row, 0, QTableWidgetItem(app["name"]))
+            
+            db_entry = app["db_entry"]
+            controlled_str = "Yes" if db_entry else "No"
+            self.table.setItem(row, 1, QTableWidgetItem(controlled_str))
+            
+            status_str = "Unrestricted"
+            usage_str = "0 B"
+            if db_entry:
+                cap = db.get_cap(db_entry["id"]) or {}
+                if cap.get("blocked"):
+                    status_str = "Blocked"
+                elif cap.get("cap_kind") == "daily_mb" and cap.get("limit_mb"):
+                    status_str = f"Limit: {cap['limit_mb']} MB/day"
+                elif cap.get("cap_kind") == "session_mb" and cap.get("limit_mb"):
+                    status_str = f"Limit: {cap['limit_mb']} MB/session"
+                elif cap.get("rate_kbps"):
+                    status_str = f"Throttled: {cap['rate_kbps']} kbps"
+                elif cap.get("sched_start") and cap.get("sched_end"):
+                    status_str = f"Scheduled: {cap['sched_start']}-{cap['sched_end']}"
+                
+                usage = db.usage_for_app(db_entry["id"], period="today")
+                usage_str = f"{human_bytes(usage['total_bytes'])} (↓{human_bytes(usage['rx_bytes'])} ↑{human_bytes(usage['tx_bytes'])})"
+            
+            self.table.setItem(row, 2, QTableWidgetItem(status_str))
+            self.table.setItem(row, 3, QTableWidgetItem(usage_str))
+            
+            cfg_btn = QPushButton("Configure")
+            cfg_btn.clicked.connect(lambda _, r=row: self._configure_row(r))
+            self.table.setCellWidget(row, 4, cfg_btn)
+
+    def reload_usage_and_status(self):
+        self.reload_table()
+
+    def _on_item_double_clicked(self, item):
+        self._configure_row(item.row())
+
+    def _configure_row(self, row):
+        if row >= len(self._current_rows):
+            return
+        app = self._current_rows[row]
+        db_entry = app["db_entry"]
+        existing_cap = db.get_cap(db_entry["id"]) if db_entry else None
+        
+        dialog = AppConfigDialog(
+            self,
+            app_name=app["name"],
+            match_kind=app["kind"],
+            match_value=app["match_value"],
+            existing_app=db_entry,
+            existing_cap=existing_cap
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.refresh_apps()
 
     def browse_executable(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select executable", "/usr/bin")
         if path:
-            self._add_app(os.path.basename(path), "path", path)
-
-    def add_selected(self):
-        idx = self.proc_combo.currentIndex()
-        if idx < 0:
-            return
-        if self.source_combo.currentText() == "Running processes":
-            name = self.proc_combo.currentText()
-            if name:
-                self._add_app(name, "process_name", name)
-        else:
-            app = self._installed_apps[idx]
-            self._add_app(app.name, app.kind, app.match_value)
-
-    def _add_app(self, name, match_kind, match_value):
-        cgroup_name = slugify(name)
-        app_id = db.add_app(name, match_kind, match_value, cgroup_name)
-        try:
-            priv.create(cgroup_name)
-        except priv.HelperError as e:
-            QMessageBox.warning(self, "NetGuard", f"Could not create control group:\n{e}")
-        self.reload_table()
-
-    def reload_table(self):
-        apps = db.list_apps()
-        self.table.setRowCount(len(apps))
-        for row, app in enumerate(apps):
-            cap = db.get_cap(app["id"]) or {}
-            usage = db.usage_for_app(app["id"], period="today")
-
-            usage_str = (f"{app['name']}  (today: {human_bytes(usage['total_bytes'])} total, "
-                         f"↓{human_bytes(usage['rx_bytes'])} ↑{human_bytes(usage['tx_bytes'])})")
-            self.table.setItem(row, 0, QTableWidgetItem(usage_str))
-
-            block_chk = QCheckBox()
-            block_chk.setChecked(bool(cap.get("blocked")))
-            block_chk.stateChanged.connect(lambda state, a=app, c=cap: self._toggle_block(a, c, state))
-            self.table.setCellWidget(row, 1, block_chk)
-
-            cap_combo = QComboBox()
-            cap_combo.addItems(["none", "daily_mb", "session_mb"])
-            cap_combo.setCurrentText(cap.get("cap_kind", "none"))
-            self.table.setCellWidget(row, 2, cap_combo)
-
-            limit_spin = QDoubleSpinBox()
-            limit_spin.setRange(0, 1_000_000)
-            limit_spin.setValue(cap.get("limit_mb") or 0)
-            self.table.setCellWidget(row, 3, limit_spin)
-
-            rate_spin = QDoubleSpinBox()
-            rate_spin.setRange(0, 1_000_000)
-            rate_spin.setValue(cap.get("rate_kbps") or 0)
-            self.table.setCellWidget(row, 4, rate_spin)
-
-            sched_widget = QWidget()
-            sched_layout = QHBoxLayout(sched_widget)
-            sched_layout.setContentsMargins(0, 0, 0, 0)
-            start_edit = QTimeEdit()
-            end_edit = QTimeEdit()
-            if cap.get("sched_start"):
-                start_edit.setTime(start_edit.time().fromString(cap["sched_start"], "HH:mm"))
-            if cap.get("sched_end"):
-                end_edit.setTime(end_edit.time().fromString(cap["sched_end"], "HH:mm"))
-            sched_layout.addWidget(start_edit)
-            sched_layout.addWidget(QLabel("-"))
-            sched_layout.addWidget(end_edit)
-            self.table.setCellWidget(row, 5, sched_widget)
-
-            actions = QWidget()
-            act_layout = QHBoxLayout(actions)
-            act_layout.setContentsMargins(0, 0, 0, 0)
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(
-                lambda _, a=app, cc=cap_combo, ls=limit_spin, rs=rate_spin,
-                se=start_edit, ee=end_edit: self._save_cap(a, cc, ls, rs, se, ee)
+            name = os.path.basename(path)
+            db_apps = db.list_apps()
+            existing_app = next((a for a in db_apps if a["match_kind"] == "path" and a["match_value"] == path), None)
+            existing_cap = db.get_cap(existing_app["id"]) if existing_app else None
+            
+            dialog = AppConfigDialog(
+                self,
+                app_name=name,
+                match_kind="path",
+                match_value=path,
+                existing_app=existing_app,
+                existing_cap=existing_cap
             )
-            remove_btn = QPushButton("Remove")
-            remove_btn.clicked.connect(lambda _, a=app: self._remove_app(a))
-            act_layout.addWidget(save_btn)
-            act_layout.addWidget(remove_btn)
-            self.table.setCellWidget(row, 6, actions)
-
-    def _toggle_block(self, app, cap, state):
-        blocked = state == Qt.CheckState.Checked.value
-        db.set_blocked(app["id"], blocked)
-        try:
-            if blocked:
-                priv.block(app["cgroup_name"])
-            else:
-                priv.unblock(app["cgroup_name"])
-        except priv.HelperError as e:
-            QMessageBox.warning(self, "NetGuard", f"Could not apply block:\n{e}")
-        db.log_event(app["id"], "manual_block" if blocked else "manual_unblock")
-
-    def _save_cap(self, app, cap_combo, limit_spin, rate_spin, start_edit, end_edit):
-        cap_kind = cap_combo.currentText()
-        limit_mb = limit_spin.value() or None
-        rate_kbps = rate_spin.value() or None
-        sched_start = start_edit.time().toString("HH:mm")
-        sched_end = end_edit.time().toString("HH:mm")
-        # Treat "00:00-00:00" as "no schedule restriction".
-        if sched_start == "00:00" and sched_end == "00:00":
-            sched_start = sched_end = None
-        db.set_cap(app["id"], cap_kind, limit_mb, rate_kbps, sched_start, sched_end, enabled=True)
-        try:
-            if rate_kbps:
-                priv.limit(app["cgroup_name"], rate_kbps)
-            else:
-                priv.unlimit(app["cgroup_name"])
-        except priv.HelperError as e:
-            QMessageBox.warning(self, "NetGuard", f"Could not apply rate limit:\n{e}")
-        QMessageBox.information(self, "NetGuard", f"Saved settings for {app['name']}")
-
-    def _remove_app(self, app):
-        try:
-            priv.destroy(app["cgroup_name"])
-        except priv.HelperError:
-            pass
-        db.remove_app(app["id"])
-        self.reload_table()
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.refresh_apps()
 
 
 class UsageTab(QWidget):

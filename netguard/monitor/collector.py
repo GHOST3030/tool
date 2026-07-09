@@ -80,9 +80,15 @@ class Collector:
             return
         procs = list(psutil.process_iter(["pid", "name", "exe"]))
         for app in apps:
+            # Safety check: never attach to systemd or manage systemd cgroups
+            if app["match_value"] == "systemd":
+                continue
             seen = self._known_pids.setdefault(app["cgroup_name"], set())
             for proc in procs:
                 if proc.pid in seen:
+                    continue
+                # Skip critical system processes (PIDs <= 100)
+                if proc.pid <= 100:
                     continue
                 if self._matches(proc, app):
                     try:

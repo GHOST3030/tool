@@ -215,6 +215,10 @@ def cmd_counters(_args):
     print(json.dumps(result))
 
 
+def cmd_show(_args):
+    sh("nft", "list", "table", *NFT_TABLE.split())
+
+
 COMMANDS = {
     "setup": cmd_setup,
     "create": cmd_create,
@@ -225,6 +229,7 @@ COMMANDS = {
     "limit": cmd_limit,
     "unlimit": cmd_unlimit,
     "counters": cmd_counters,
+    "show": cmd_show,
 }
 
 

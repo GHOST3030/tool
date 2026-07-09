@@ -8,8 +8,8 @@
     <description>Run the NetGuard network control helper</description>
     <message>Authentication is required to change NetGuard's network rules</message>
     <defaults>
-      <allow_any>no</allow_any>
-      <allow_inactive>no</allow_inactive>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/netguard/netguard-helper</annotate>
