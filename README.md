@@ -33,15 +33,24 @@ ranges, and see live totals from the taskbar tray icon.
 - Both the monitor and tray icon start automatically at login via
   `systemd --user` services.
 
-## Install
+## Install & run
 
 ```bash
 git clone <this repo>
 cd tool
-bash netguard/install/install.sh
+./start.sh
 ```
 
-Requires cgroup v2 (default on Zorin OS 16/17) and `nftables` installed.
+`start.sh` installs system requirements (`nftables`, `python3-venv`,
+`policykit-1`, `libnotify-bin`) via `apt`, runs the installer (helper,
+polkit policy, Python venv, autostart services) on first run only, and then
+launches the GUI. Run it again any time to just relaunch the GUI — it skips
+setup once already installed (delete `~/.local/share/netguard/.installed`
+to force it to reinstall/upgrade).
+
+Requires cgroup v2 (default on Zorin OS 16/17) and an `apt`-based system.
+If you're not on `apt`, install `nftables`, `python3-venv`, `policykit-1`,
+and `libnotify-bin` manually, then run `netguard/install/install.sh` directly.
 
 ## Uninstall
 
